@@ -1,8 +1,6 @@
 import os
 import warnings
 warnings.filterwarnings('ignore')
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
 import streamlit as st
 import pandas as pd
@@ -209,3 +207,5 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
         
     return fig, report_out
 
+# --- STREAMLIT SIDEBAR CONTROLS ---
+st.sidebar.header("🛠️ Crisis Simulator Controls")
