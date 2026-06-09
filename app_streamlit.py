@@ -69,7 +69,7 @@ def load_all_resources():
         else:
             text_cols = df.select_dtypes(include=['object']).columns
             if len(text_cols) > 0:
-                df = df.rename(columns={text_cols: 'zone'})
+                df = df.rename(columns={text_cols[0]: 'zone'})
             else:
                 df['zone'] = ["Zone_" + str(i) for i in range(len(df))]
     except:
@@ -188,7 +188,7 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
     ax.set_axis_off()
     plt.title(f"GNN Prediction Map - Target: {zone}", color='white', fontsize=10)
     
-    groq_api_key = os.environ.get("GROQ_API_KEY")
+    groq_api_key = os.environ.get("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
     if not groq_api_key:
         return fig, "⚠️ Error: GROQ_API_KEY is missing from environment variables."
         
@@ -208,4 +208,3 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
     return fig, report_out
 
 # --- STREAMLIT SIDEBAR CONTROLS ---
-st.sidebar.header("🛠️ Crisis Simulator Controls")
