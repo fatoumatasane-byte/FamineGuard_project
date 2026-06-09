@@ -1,6 +1,7 @@
 import os
 import warnings
 warnings.filterwarnings('ignore')
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import streamlit as st
 import pandas as pd
@@ -9,71 +10,97 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-
-# --- ENCAPSULATION STRICTE DE GEOPANDAS ---
-try:
-    import geopandas as gpd
-    GEOPANDAS_AVAILABLE = True
-except:
-    GEOPANDAS_AVAILABLE = False
-
-# --- CONFIGURATION INTERFACE COMPLÈTE ---
+import geopandas as gpd
+from torch_geometric.nn import GATConv
+from torch_geometric.data import Data
+from sklearn.preprocessing import StandardScaler
 from langchain_groq import ChatGroq
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain import hub
 from langchain_core.tools import tool
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 
-try:
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain_community.vectorstores import Chroma
-    CHROMA_AVAILABLE = True
-except:
-    CHROMA_AVAILABLE = False
-
+# --- INTERFACE CONFIGURATION ---
 st.set_page_config(page_title="FamineGuard Dashboard", layout="wide", page_icon="🌾")
 st.title("🌾 FamineGuard: Spatiotemporal GNN & Agentic RAG Platform")
 st.markdown("### Production Version Connected to Live Models — AIMS Senegal")
 
-zones_liste = ["Matam", "Dakar", "Podor", "Saint louis", "Tambacounda", "Louga", "Ziguinchor", "Kaffrine"]
+# --- SPATIOTEMPORAL GNN ARCHITECTURE RECREATION ---
+class FamineSTGNN(nn.Module):
+    def __init__(self, in_features, hidden_dim=64, lstm_hidden=32, n_classes=5, heads=4, dropout=0.3):
+        super().__init__()
+        self.dropout_rate = dropout
+        self.gat1 = GATConv(in_features, hidden_dim, heads=heads, dropout=dropout, edge_dim=1)
+        self.gat2 = GATConv(hidden_dim * heads, hidden_dim, heads=1, dropout=dropout, edge_dim=1)
+        self.bn1 = nn.BatchNorm1d(hidden_dim * heads)
+        self.bn2 = nn.BatchNorm1d(hidden_dim)
+        self.lstm = nn.LSTM(hidden_dim, lstm_hidden, num_layers=2, batch_first=True, dropout=dropout)
+        self.residual = nn.Linear(in_features, hidden_dim)
+        self.classifier = nn.Sequential(
+            nn.Linear(lstm_hidden, 32), nn.ReLU(), nn.Dropout(dropout), nn.Linear(32, n_classes)
+        )
 
-# --- LOADING DATASET ---
+    def forward(self, data):
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        edge_w = edge_attr / (edge_attr.max() + 1e-8)
+        h = self.gat1(x, edge_index, edge_attr=edge_w)
+        h = self.bn1(h)
+        h = F.elu(h)
+        h = F.dropout(h, p=self.dropout_rate, training=self.training)
+        h = self.gat2(h, edge_index, edge_attr=edge_w)
+        h = self.bn2(h)
+        h = F.elu(h) + self.residual(x)
+        lstm_out, _ = self.lstm(h.unsqueeze(1))
+        return F.log_softmax(self.classifier(lstm_out[:, -1, :]), dim=1)
+
+# --- LOADING PIPELINE WITH AUTO-DETECTION ---
 @st.cache_resource
 def load_all_resources():
+    # Chargement de votre vrai CSV de données (44 zones)
     try: 
         df = pd.read_csv('ipc_sen_area_long_latest.csv')
         possible_columns = ['zone', 'Zone', 'region', 'Region', 'department', 'departement', 'adm2_name', 'adm1_name']
-        found_col = None
         for col in possible_columns:
             if col in df.columns:
-                found_col = col
+                df = df.rename(columns={col: 'zone'})
                 break
-        if found_col:
-            df = df.rename(columns={found_col: 'zone'})
     except:
-        df = pd.DataFrame({'zone': zones_liste})
+        zones = ["Dakar", "Matam", "Podor", "Saint louis", "Tambacounda", "Louga", "Ziguinchor", "Kaffrine"]
+        df = pd.DataFrame({'zone': zones})
         
-    s_map = None
-    if GEOPANDAS_AVAILABLE and os.path.exists('ipc_sen.geojson'):
-        try: 
-            s_map = gpd.read_file('ipc_sen.geojson')
-            # Harmonisation des colonnes de géométrie du Sénégal
-            for col_map in ['reg', 'REG', 'NAME_1', 'geometry']:
-                if col_map in s_map.columns:
-                    s_map = s_map.rename(columns={col_map: 'reg'})
-        except: 
-            s_map = None
-            
-    v_store = None
-    if CHROMA_AVAILABLE and os.path.exists('mon_index_chroma'):
-        try:
-            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-            v_store = Chroma(persist_directory="mon_index_chroma", embedding_function=embeddings)
-        except:
-            v_store = None
-            
-    return df, s_map, v_store
+    features_list = ['ndvi_mean', 'ndvi_anomaly', 'ndvi_min', 'Millet', 'Rice (imported)', 'Rice (local)', 
+                'Sorghum', 'Sorghum (imported)', 'price_volatility', 'alps_stress', 'road_connectivity', 'pct_stressed']
 
-nodes_df, senegal_map, vectorstore = load_all_resources()
+    for col in features_list:
+        if col not in df.columns: df[col] = 0.0
+
+    X_raw = df[features_list].values.astype(np.float32)
+    scaler_obj = StandardScaler().fit(X_raw)
+
+    # Chargement de votre vrai modèle GNN entraîné
+    gnn_model = FamineSTGNN(in_features=len(features_list))
+    if os.path.exists('model_weights.pth'):
+        gnn_model.load_state_dict(torch.load('model_weights.pth', map_location=torch.device('cpu')))
+    gnn_model.eval()
+
+    # Chargement de votre carte géographique GeoJSON
+    s_map = None
+    if os.path.exists('ipc_sen.geojson'):
+        s_map = gpd.read_file('ipc_sen.geojson')
+        # Standardisation de la colonne de nom de région pour la jointure graphique
+        for c in s_map.columns:
+            if c.lower() in ['reg', 'region', 'name_1', 'name_2', 'departement', 'dept']:
+                s_map = s_map.rename(columns={c: 'map_zone_name'})
+                break
+
+    # Chargement de votre vraie base de connaissances RAG Chroma
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    v_store = Chroma(persist_directory="mon_index_chroma", embedding_function=embeddings) if os.path.exists('mon_index_chroma') else None
+    
+    return df, features_list, scaler_obj, gnn_model, s_map, v_store
+
+nodes_df, features, scaler, model, senegal_map, vectorstore = load_all_resources()
 
 # --- AGENT TOOLS ---
 @tool
@@ -82,105 +109,105 @@ def get_gnn_stats(zone_name: str):
     try:
         df = pd.read_csv('famineguard_alert_report.csv')
         data = df[df['zone'].str.lower() == zone_name.lower()]
-        return str(data.to_dict(orient='records')) if not data.empty else f"Zone {zone_name} is under CRITICAL alert status."
+        return data.to_dict(orient='records') if not data.empty else "Zone not found in last GNN evaluation stream."
     except:
-        return f"Zone {zone_name} predicted IPC Phase 4 (Critical). NDVI status is LOW, price status is HIGH."
+        return "Simulation data missing. Run prediction pipeline first."
 
 @tool
 def search_humanitarian_reports(query: str):
     """Search for historical analogies and food crisis logs inside the uploaded Chroma vector database."""
-    if vectorstore is not None:
-        try:
-            docs = vectorstore.similarity_search(query, k=2)
-            return "\n\n".join([d.page_content for d in docs])
-        except:
-            pass
-    return "Sahel 2012 Food Crisis Analogy: Northern and Central areas (Matam, Podor, Dakar markets) hit by biomass drought and 45% price spikes. Early interventions through WFP Cash Transfers and UNICEF therapeutic milk distributions successfully lowered critical malnutrition thresholds."
+    if vectorstore is None: 
+        return "Vector database connection failed. Reverting to baseline internal rules."
+    try:
+        docs = vectorstore.similarity_search(query, k=2)
+        return "\n\n".join([f"Source Document: {d.metadata.get('source', 'Historical Report')}\nContent Extracted:\n{d.page_content}" for d in docs])
+    except Exception as e:
+        return f"RAG Index Error: {e}"
 
-tools_agent = [get_gnn_stats, search_humanitarian_reports]
+tools = [get_gnn_stats, search_humanitarian_reports]
 
-# --- PIPELINE ENGINE ---
+# --- PIPELINE ENGINE (VRAI CALCUL GNN MATHÉMATIQUE) ---
 def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
-    alert_df = pd.DataFrame([{
-        'zone': zone, 'predicted_ipc_phase': 4, 'alert_level': 'CRITICAL',
-        'ndvi_status': 'LOW', 'price_status': 'HIGH', 'pct_population_stressed': 55.0
-    }])
-    alert_df.to_csv('famineguard_alert_report.csv', index=False)
+    df_simule = nodes_df.copy()
+    idx = df_simule[df_simule['zone'].str.lower() == zone.lower()].index
     
+    # Application locale du choc anthropique sur le nœud cible du graphe
+    if not idx.empty:
+        df_simule.loc[idx, 'ndvi_mean'] *= b_ndvi
+        df_simule.loc[idx, 'ndvi_anomaly'] = -3.5
+        for col in ['Millet', 'Rice (imported)', 'Rice (local)', 'Sorghum']:
+            if col in df_simule.columns: 
+                df_simule.loc[idx, col] *= h_prix
+        df_simule.loc[idx, 'price_volatility'] = 85.0
+        df_simule.loc[idx, 'alps_stress'] = 1.0
+        df_simule.loc[idx, 'pct_stressed'] = 55.0
+        
+    X_scaled = scaler.transform(df_simule[features].values.astype(np.float32))
+    num_nodes = len(df_simule)
+    
+    # Reconstruction de la matrice d'adjacence globale (Graphe complet interconnecté)
+    edges_src = list(range(num_nodes - 1)) + list(range(1, num_nodes))
+    edges_dst = list(range(1, num_nodes)) + list(range(num_nodes - 1))
+    graph_data = Data(x=torch.tensor(X_scaled, dtype=torch.float), 
+                      edge_index=torch.tensor([edges_src, edges_dst], dtype=torch.long), 
+                      edge_attr=torch.ones((len(edges_src), 1)))
+    
+    # VRAIE PRÉDICTION SANS CONDITION FORCÉE
+    with torch.no_grad():
+        try: 
+            out = model(graph_data)
+            preds = out.argmax(dim=1).cpu().numpy() + 1
+        except: 
+            preds = np.ones(num_nodes)
+        
+    alert_records = []
+    target_zone_phase = 1
+    for i, row in df_simule.iterrows():
+        current_zone = row['zone']
+        phase = int(preds[i % len(preds)])
+        
+        # Capture de la phase calculée pour la zone étudiée
+        if current_zone.lower() == zone.lower():
+            target_zone_phase = phase
+            
+        alert_level = 'CRITICAL' if phase >= 4 else ('WATCH' if phase == 3 else 'STABLE')
+        alert_records.append({
+            'zone': current_zone, 'predicted_ipc_phase': phase, 'alert_level': alert_level,
+            'ndvi_status': 'LOW' if row.get('ndvi_mean', 0.3) < 0.25 else 'NORMAL',
+            'price_status': 'HIGH' if row.get('price_volatility', 0) > 50 else 'NORMAL',
+            'road_connectivity': int(row.get('road_connectivity', 20)),
+            'pct_population_stressed': float(row.get('pct_stressed', 10))
+        })
+    pd.DataFrame(alert_records).to_csv('famineguard_alert_report.csv', index=False)
+    
+    # Génération du graphique cartographique réel
     fig, ax = plt.subplots(figsize=(5, 4), facecolor='#111111')
     ax.set_facecolor('#111111')
-    
     if senegal_map is not None:
         try:
-            # Coloration géospatiale dynamique
+            # Coloration dynamique du département ciblé en rouge
             senegal_map["color_status"] = '#2ECC71'
-            idx_target = senegal_map[senegal_map['reg'].astype(str).str.lower().str.contains(zone.lower())].index
-            if not idx_target.empty:
-                senegal_map.loc[idx_target, "color_status"] = '#E74C3C'
-            else:
-                senegal_map.iloc[0, senegal_map.columns.get_loc("color_status")] = '#E74C3C'
+            if 'map_zone_name' in senegal_map.columns:
+                idx_map = senegal_map[senegal_map['map_zone_name'].astype(str).str.lower().str.contains(zone.lower())].index
+                if not idx_map.empty:
+                    senegal_map.loc[idx_map, "color_status"] = '#E74C3C'
             senegal_map.plot(color=senegal_map["color_status"], edgecolor='white', linewidth=0.4, ax=ax)
         except:
-            ax.scatter(0.5, 0.5, c='#E74C3C', s=300)
+            ax.scatter(0.5, 0.5, c='#E74C3C', s=200)
     else:
-        # Représentation en réseau de neurones sur graphe si absence de fichier cartographique GIS
-        for i in range(12):
-            c_node = '#E74C3C' if i == 4 else '#2ECC71'
-            s_node = 250 if i == 4 else 60
-            np.random.seed(i)
-            ax.scatter(np.random.rand(), np.random.rand(), c=c_node, s=s_node, edgecolors='white', linewidths=0.5, zorder=3)
-        ax.text(0.5, -0.05, "Spatiotemporal Graph Network Topology Active", color='white', ha='center', fontsize=8)
-
+        # Dessin schématique de la topologie du réseau de neurones si échec SIG
+        for i in range(num_nodes):
+            c_node = '#E74C3C' if df_simule.iloc[i]['zone'].lower() == zone.lower() else '#2ECC71'
+            ax.scatter(np.random.rand(), np.random.rand(), c=c_node, s=150 if c_node=='#E74C3C' else 40, edgecolors='white')
+            
     ax.set_axis_off()
-    plt.title(f"GNN Network Propagation Map - Target: {zone}", color='white', fontsize=10)
+    plt.title(f"GNN Propagation Network — Focus: {zone}", color='white', fontsize=10)
     
     groq_api_key = os.environ.get("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
     if not groq_api_key:
-        return fig, "⚠️ Error: GROQ_API_KEY is missing."
+        return fig, target_zone_phase, "⚠️ Error: GROQ_API_KEY is missing."
         
     try:
         llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0.2, groq_api_key=groq_api_key)
         prompt = hub.pull("hwchase17/react")
-        agent = create_react_agent(llm, tools_agent, prompt)
-        
-        # CORRECTION LOGIQUE : Augmentation à 7 itérations max pour laisser l'agent finir son travail
-        executor = AgentExecutor(agent=agent, tools=tools_agent, verbose=True, handle_parsing_errors=True, max_iterations=7)
-        
-        lang_instr = "IMPORTANT: You MUST write your final response in FRENCH." if langue == "French" else "IMPORTANT: You MUST write your final response in ENGLISH."
-        query_task = f"{lang_instr} Provide an operational decision report for simulated crisis in the zone: {zone}. Use your tools to check statistics and historical analogies."
-        res = executor.invoke({"input": query_task})
-        report_out = res["output"]
-    except Exception as e:
-        report_out = f"Operational Plan Framework ({langue}): Immediate allocation of cash transfer mechanisms for {zone}. Market monitoring implemented for cereal values spikes."
-        
-    return fig, report_out
-
-# --- STREAMLIT SIDEBAR CONTROLS ---
-st.sidebar.header("🛠️ Crisis Simulator Controls")
-choices_zones = nodes_df['zone'].dropna().unique().tolist() if 'zone' in nodes_df.columns else zones_liste
-zone_input = st.sidebar.selectbox("Select Target Zone for Experiment", choices_zones)
-price_input = st.sidebar.slider("Cereal Price Spike (Multiplier Factor)", 1.0, 5.0, 3.5, step=0.1)
-ndvi_input = st.sidebar.slider("Vegetation Crash NDVI (Reduction Factor)", 0.1, 1.0, 0.2, step=0.1)
-lang_input = st.sidebar.radio("Agent Report Language", ["English", "French"])
-run_btn = st.sidebar.button("🔮 RUN PROPAGATION & RAG", type="primary")
-
-# --- MAIN DISPLAY ---
-col_graph, col_rag = st.columns(2)
-
-if run_btn:
-    with st.spinner("Processing simulation through GNN & Agentic RAG..."):
-        fig_map, agent_report = executer_simulation_globale(zone_input, price_input, ndvi_input, lang_input)
-        
-    with col_graph:
-        st.subheader("🔮 Layer 2: Geospatial GNN Map")
-        st.pyplot(fig_map)
-        st.metric(label=f"Vulnerability index for {zone_input}", value="Phase 4: CRITICAL", delta="Drought shock active")
-        
-    with col_rag:
-        st.subheader("🤖 Layer 3: Agentic RAG Report")
-        st.markdown(agent_report)
-else:
-    with col_graph:
-        st.info("💡 Set the shock parameters on the sidebar and click the button to trigger the GNN.")
-    with col_rag:
-        st.info("🕒 Awaiting alert parameters stream...")
+        agent = create_react_agent(llm, tools, prompt)
