@@ -10,7 +10,8 @@ langchain-community==0.2.16
 langchain-core==0.2.43
 langchain-groq==0.1.9
 langchainhub==0.1.21
-chromadb
+chromadb==0.5.3
 pypdf
 sentence-transformers
 torch-geometric
+protobuf==4.25.3
