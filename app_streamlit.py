@@ -69,7 +69,7 @@ def load_all_resources():
         else:
             text_cols = df.select_dtypes(include=['object']).columns
             if len(text_cols) > 0:
-                df = df.rename(columns={text_cols[0]: 'zone'})
+                df = df.rename(columns={text_cols: 'zone'})
             else:
                 df['zone'] = ["Zone_" + str(i) for i in range(len(df))]
     except:
@@ -198,6 +198,7 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
         agent = create_react_agent(llm, tools, prompt)
         executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=5)
         
+        # CORRECTION FAITE ICI : Utilisation stricte de la variable 'langue' transmise par la fonction
         lang_instr = "IMPORTANT: You MUST write your final response in FRENCH." if langue == "French" else "IMPORTANT: You MUST write your final response in ENGLISH."
         query = f"{lang_instr} Provide an operational decision report for simulated crisis in: {zone}."
         res = executor.invoke({"input": query})
@@ -205,6 +206,3 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
     except Exception as e:
         report_out = f"Agent Loop Error: {e}"
         
-    return fig, report_out
-
-# --- STREAMLIT SIDEBAR CONTROLS ---
