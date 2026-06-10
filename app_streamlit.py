@@ -59,30 +59,29 @@ def load_resources():
                 break
 
     v_store = None
+    embed_model = None
     chroma_path = "mon_index_chroma"
     if os.path.exists(chroma_path):
         try:
             import chromadb
-            from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-            ef = SentenceTransformerEmbeddingFunction(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                device="cpu",
-                normalize_embeddings=True
-            )
+            from sentence_transformers import SentenceTransformer
+            # Charger la collection SANS embedding_function pour éviter le bug '_type'
             chroma_client = chromadb.PersistentClient(path=chroma_path)
             col_list = chroma_client.list_collections()
             if not col_list:
-                raise ValueError("Aucune collection trouvée dans l'index Chroma")
+                raise ValueError("Aucune collection trouvée")
             col_name = col_list[0].name if hasattr(col_list[0], 'name') else str(col_list[0])
-            v_store = chroma_client.get_collection(name=col_name, embedding_function=ef)
+            v_store = chroma_client.get_collection(name=col_name)
+            embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
             count = v_store.count()
             st.sidebar.success(f"✅ RAG : {count} chunks indexés")
         except Exception as e:
             st.sidebar.warning(f"⚠️ RAG non disponible : {e}")
             v_store = None
-    return gdf, v_store
+            embed_model = None
+    return gdf, v_store, embed_model
 
-gdf, vectorstore = load_resources()
+gdf, vectorstore, embed_model = load_resources()
 
 # ─── FONCTIONS ───────────────────────────────────────────────────────────────
 def compute_phase(prix_val, ndvi_val, seed=None):
@@ -117,11 +116,12 @@ def get_susceptible_neighbors(gdf, zone_name, target_phase, prix_val, ndvi_val):
 
 def tool_search_rag(query):
     """Recherche dans les archives PDF indexées. Retourne None si indisponible."""
-    if vectorstore is None:
+    if vectorstore is None or embed_model is None:
         return None
     try:
+        query_emb = embed_model.encode([query], normalize_embeddings=True).tolist()
         results = vectorstore.query(
-            query_texts=[query],
+            query_embeddings=query_emb,
             n_results=3,
             include=["documents", "metadatas"]
         )
