@@ -18,3 +18,4 @@ protobuf==4.25.3
 langchain-text-splitters
 scikit-learn
 pysqlite3-binary
+openai
