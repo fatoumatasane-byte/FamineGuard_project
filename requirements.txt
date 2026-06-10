@@ -7,12 +7,11 @@ streamlit-folium
 scikit-learn
 matplotlib
 networkx
- 
-# ── Deep learning (CPU-only pour Streamlit Cloud) ─────────────────
-torch==2.2.2+cpu ; platform_system != "Darwin"
-torch==2.2.2     ; platform_system == "Darwin"
+
+# ── Deep learning ─────────────────────────────────────────────────
+torch
 torch-geometric
- 
+
 # ── LangChain ecosystem ───────────────────────────────────────────
 langchain==0.2.16
 langchain-core==0.2.43
@@ -21,20 +20,18 @@ langchain-text-splitters
 langchain-huggingface
 langchain-groq==0.1.9
 langchainhub==0.1.21
-# ✅ Package officiel Chroma pour LangChain (remplace l'ancien intégré)
 langchain-chroma>=0.1.4
- 
+
 # ── Vector store ──────────────────────────────────────────────────
 chromadb==0.5.3
-# Fix SQLite sur Streamlit Cloud
 pysqlite3-binary
- 
+
 # ── Embeddings & NLP ──────────────────────────────────────────────
 sentence-transformers
 pypdf
- 
+
 # ── LLM API ───────────────────────────────────────────────────────
 openai
- 
-# ── Protobuf (compatibilité chromadb / grpc) ──────────────────────
+
+# ── Protobuf ──────────────────────────────────────────────────────
 protobuf==4.25.3
