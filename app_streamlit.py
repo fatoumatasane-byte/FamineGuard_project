@@ -276,16 +276,16 @@ with col1:
         # ── ÉTAT ANALYSE : graphe de propagation ──
         st.markdown(f"### 🗺️ Propagation du risque — {st.session_state.selected_zone}")
 
-        # Polygones
+        # Polygones : seule la zone cible a un fond coloré
+        # Les voisins restent neutres — leur distinction passe par le nœud
         def style_analysis(feature):
             z = feature['properties']['title']
             if z == st.session_state.selected_zone:
-                return {'fillColor': PHASE_COLORS[target_phase],
-                        'color': '#ffffff', 'weight': 3, 'fillOpacity': 0.85}
-            elif z in susceptible:
-                return {'fillColor': PHASE_COLORS[susceptible[z]],
-                        'color': '#dddddd', 'weight': 1.5, 'fillOpacity': 0.70}
-            return {'fillColor': NEUTRAL, 'color': '#555', 'weight': 0.5, 'fillOpacity': 0.30}
+                return {
+                    'fillColor': PHASE_COLORS[target_phase],
+                    'color': '#ffffff', 'weight': 4, 'fillOpacity': 0.85
+                }
+            return {'fillColor': NEUTRAL, 'color': '#555', 'weight': 0.5, 'fillOpacity': 0.25}
 
         folium.GeoJson(
             gdf[['title', 'geometry']],
@@ -307,8 +307,8 @@ with col1:
             folium.PolyLine(
                 [t_pt, nb_pt],
                 color=PHASE_COLORS[phase],
-                weight=1.5 + phase * 0.8,
-                opacity=0.85,
+                weight=2 + phase * 0.7,
+                opacity=0.9,
                 tooltip=f"Propagation → {zone_name} : {PHASE_LABELS[phase]}"
             ).add_to(m)
 
@@ -320,26 +320,69 @@ with col1:
             is_neighbor = (z in susceptible)
 
             if is_target:
-                nc, r = PHASE_COLORS[target_phase], 13
-                # Halo autour de la zone cible
+                nc = PHASE_COLORS[target_phase]
+                # Double halo pour la zone cible
+                for halo_r, halo_op in [(28, 0.20), (20, 0.35)]:
+                    folium.CircleMarker(
+                        location=t_pt, radius=halo_r, color=nc,
+                        fill=False, weight=2, opacity=halo_op
+                    ).add_to(m)
                 folium.CircleMarker(
-                    location=t_pt, radius=22, color=nc,
-                    fill=False, weight=2, opacity=0.4
+                    location=t_pt, radius=14,
+                    color='#ffffff', fill=True, fill_color=nc,
+                    fill_opacity=1.0, weight=3,
+                    tooltip=f"<b>🎯 ZONE CIBLE : {z}</b><br>{PHASE_LABELS[target_phase]}"
                 ).add_to(m)
-                tip = f"<b>{z}</b><br>{PHASE_LABELS[target_phase]} ← Zone cible"
-            elif is_neighbor:
-                nc, r = PHASE_COLORS[susceptible[z]], 8
-                tip = f"<b>{z}</b><br>{PHASE_LABELS[susceptible[z]]} ← Propagation"
-            else:
-                nc, r = '#888888', 4
-                tip = z
+                # Label "CIBLE" au-dessus du nœud
+                folium.Marker(
+                    location=t_pt,
+                    icon=folium.DivIcon(
+                        html=f"""<div style="
+                            background:{nc}; color:white; font-weight:700;
+                            font-size:10px; padding:2px 6px; border-radius:4px;
+                            white-space:nowrap; border:1px solid white;
+                            margin-top:-38px; margin-left:-20px;">
+                            🎯 CIBLE
+                        </div>""",
+                        icon_size=(60, 20), icon_anchor=(0, 0)
+                    )
+                ).add_to(m)
 
-            folium.CircleMarker(
-                location=pt, radius=r,
-                color='white', fill=True, fill_color=nc,
-                fill_opacity=0.95, weight=2 if is_target else 1,
-                tooltip=tip
-            ).add_to(m)
+            elif is_neighbor:
+                nc = PHASE_COLORS[susceptible[z]]
+                # Nœud voisin : coloré par phase, contour noir pour contraste avec la carte
+                folium.CircleMarker(
+                    location=pt, radius=10,
+                    color='#111111', fill=True, fill_color=nc,
+                    fill_opacity=0.95, weight=2,
+                    tooltip=f"<b>⚠️ {z}</b><br>{PHASE_LABELS[susceptible[z]]} ← Propagation"
+                ).add_to(m)
+
+            else:
+                # Autres zones : petit point gris discret
+                folium.CircleMarker(
+                    location=pt, radius=3,
+                    color='#666', fill=True, fill_color='#666',
+                    fill_opacity=0.5, weight=1,
+                    tooltip=z
+                ).add_to(m)
+
+        # Légende de propagation sur la carte
+        legend_html = f"""
+        <div style="position:fixed; bottom:28px; left:28px; z-index:1000;
+             background:rgba(15,17,23,0.92); padding:12px 16px; border-radius:10px;
+             border:1px solid #555; font-family:sans-serif; font-size:12px;
+             color:white; line-height:2;">
+            <b style="font-size:13px;">Graphe de Propagation</b><br>
+            <span style="color:{PHASE_COLORS[target_phase]}">⬤</span>
+            <b> Zone Cible</b> — fond coloré + label 🎯<br>
+            <span style="color:#E67E22">⬤</span>
+            <b> Zones Voisines Susceptibles</b> — nœud coloré<br>
+            <span style="color:#666">⬤</span> Autres zones — neutres<br>
+            <span style="color:#aaa">—</span> Arête de propagation du risque
+        </div>
+        """
+        m.get_root().html.add_child(folium.Element(legend_html))
 
     # Capture clic sur la carte
     map_data = st_folium(m, width=None, height=590, key="main_map")
