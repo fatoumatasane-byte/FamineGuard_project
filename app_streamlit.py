@@ -272,7 +272,7 @@ with col1:
         }
 
     folium.GeoJson(
-        gdf,
+        gdf[['title', 'geometry']],
         style_function=style_fn,
         tooltip=folium.GeoJsonTooltip(
             fields=['title'],
