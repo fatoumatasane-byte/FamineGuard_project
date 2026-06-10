@@ -195,13 +195,15 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
     if not groq_api_key:
         return fig, target_zone_phase, "⚠️ Error: GROQ_API_KEY is missing."
         
-    try:
+   try:
+        # Initialisation de l'Agent Groq
         llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0.2, groq_api_key=groq_api_key)
         prompt = hub.pull("hwchase17/react")
         agent = create_react_agent(llm, tools, prompt)
         executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=6)
         
         lang_instr = "IMPORTANT: You MUST write your final response in FRENCH." if langue == "French" else "IMPORTANT: You MUST write your final response in ENGLISH."
+        
         query = f"""{lang_instr}
         Provide an operational support report for the zone: {zone}.
         Instructions:
@@ -212,3 +214,64 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
         
         res = executor.invoke({"input": query})
         report_out = res["output"]
+    except Exception as e:
+        report_out = f"⚠️ Agent Error: {e}"
+        
+    return fig, target_zone_phase, report_out
+
+# --- STREAMLIT INTERFACE (PARTIE UI) ---
+
+with st.sidebar:
+    st.header("⚙️ Simulation Settings")
+    # Liste des zones récupérées dynamiquement
+    liste_zones = sorted(nodes_df['zone'].unique())
+    zone_selectionnee = st.selectbox("🎯 Select Target Zone", liste_zones)
+    
+    langue_choisie = st.radio("🌐 Agent Language", ["French", "English"])
+    
+    st.subheader("🌋 Stress Scenario")
+    prix_mul = st.slider("Price Increase Factor (Cereals)", 1.0, 5.0, 2.5)
+    ndvi_red = st.slider("Vegetation Health (1.0=Normal, 0.1=Drought)", 0.1, 1.0, 0.4)
+    
+    lancer = st.button("🚀 Run ST-GNN & Agentic RAG")
+
+# --- ZONE D'AFFICHAGE DES RÉSULTATS ---
+if lancer:
+    with st.spinner("🔄 Running Spatiotemporal GNN & Consulting Archives..."):
+        # Appel du moteur de simulation
+        fig_map, phase, rapport = executer_simulation_globale(zone_selectionnee, prix_mul, ndvi_red, langue_choisie)
+        
+        # Mise en page en deux colonnes
+        col_gauche, col_droite = st.columns([1, 1.5])
+        
+        with col_gauche:
+            st.subheader("📍 GNN Risk Map")
+            st.pyplot(fig_map)
+            
+            # Affichage du statut
+            color = "red" if phase >= 4 else "orange" if phase == 3 else "green"
+            st.markdown(f"### Current Status: <span style='color:{color}'>Phase {phase}</span>", unsafe_allow_html=True)
+            st.metric("Predicted IPC Phase", f"Level {phase}")
+
+        with col_droite:
+            st.subheader("🤖 Agentic RAG Intelligence")
+            st.info(f"Analysis for {zone_selectionnee} using Llama-3-70B & ChromaDB")
+            st.markdown(rapport)
+            
+            # Bouton pour télécharger le rapport en CSV
+            st.download_button(
+                label="📥 Download Alert Data",
+                data=pd.read_csv('famineguard_alert_report.csv').to_csv(index=False),
+                file_name=f"famineguard_{zone_selectionnee}.csv",
+                mime="text/csv"
+            )
+else:
+    # Message d'accueil par défaut
+    st.info("👈 Configurez un scénario de crise dans la barre latérale et cliquez sur le bouton pour lancer l'intelligence FamineGuard.")
+    
+    # Affichage de la carte vide ou du logo si disponible
+    if senegal_map is not None:
+        fig_init, ax_init = plt.subplots(figsize=(6, 4), facecolor='#111111')
+        senegal_map.plot(ax=ax_init, color='#2ECC71', edgecolor='white', linewidth=0.2)
+        ax_init.set_axis_off()
+        st.pyplot(fig_init)
