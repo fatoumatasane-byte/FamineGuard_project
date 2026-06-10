@@ -55,12 +55,11 @@ def load_resources():
                     break
 
     # Chargement du RAG
-    v_store = None
     if os.path.exists('mon_index_chroma'):
-        try:
-            embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-            v_store = Chroma(persist_directory="mon_index_chroma", embedding_function=embeddings)
-        except: pass
+    try:
+        from langchain_community.embeddings import FakeEmbeddings
+        v_store = Chroma(persist_directory="mon_index_chroma", embedding_function=FakeEmbeddings(size=384))
+    except: pass
         
     return df, s_map, v_store
 
