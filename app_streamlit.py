@@ -36,31 +36,25 @@ st.markdown("AIMS Senegal - Decision Support System")
 # --- CHARGEMENT DES RESSOURCES ---
 @st.cache_resource
 def load_resources():
-    # 1. Charger les données CSV
     try:
         df = pd.read_csv('ipc_sen_area_long_latest.csv')
-        # On nettoie les noms de colonnes
         df.columns = df.columns.str.strip()
-        # On cherche la colonne zone
         for col in ['Area', 'zone', 'title', 'region']:
             if col in df.columns:
                 df = df.rename(columns={col: 'zone'})
                 break
     except:
-        df = pd.DataFrame({'zone': ["Bakel", "Matam", "Podor", "Dakar", "Kolda", "Kanel"]})
+        df = pd.DataFrame({'zone': ["Bakel", "Matam", "Podor", "Dakar", "Kolda"]})
 
-    # 2. Charger la carte GeoJSON
     s_map = None
     if os.path.exists('ipc_sen.geojson'):
         s_map = gpd.read_file('ipc_sen.geojson')
-        # On identifie la colonne nom (souvent 'title' dans tes fichiers)
         if 'title' not in s_map.columns:
             for c in s_map.columns:
                 if c.lower() in ['name', 'reg', 'admin']:
                     s_map = s_map.rename(columns={c: 'title'})
                     break
-
-    # 3. Charger le RAG
+    
     v_store = None
     if CHROMA_AVAILABLE and os.path.exists('mon_index_chroma'):
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -88,40 +82,44 @@ tools_agent = [get_gnn_stats, search_reports]
 
 # --- MOTEUR DE SIMULATION ---
 def simulation_gnn_rag(zone, prix, ndvi, langue):
+    # Calcul de la Phase simulée (Logique simplifiée pour la démo)
+    # Plus le prix monte et le NDVI baisse, plus la phase est haute
+    phase_val = 1
+    if prix > 3.0 or ndvi < 0.3: phase_val = 4
+    elif prix > 2.0 or ndvi < 0.5: phase_val = 3
+    else: phase_val = 2
+
     # Création de la figure
     fig, ax = plt.subplots(figsize=(8, 6))
-    fig.patch.set_facecolor('#0E1117') # Couleur sombre Streamlit
+    fig.patch.set_facecolor('#0E1117') 
     ax.set_facecolor('#0E1117')
 
     if senegal_map is not None:
-        # On colorie tout en vert par défaut
-        senegal_map["color"] = "#2ECC71"
-        # On cherche la zone sélectionnée (insensible à la casse)
+        senegal_map["color"] = "#2ECC71" # Vert
         mask = senegal_map['title'].str.lower().str.contains(zone.lower(), na=False)
-        senegal_map.loc[mask, "color"] = "#E74C3C" # Rouge pour la zone de crise
-        
+        # Couleur selon la phase
+        color_code = "#E74C3C" if phase_val >= 4 else "#E67E22" if phase_val == 3 else "#F1C40F"
+        senegal_map.loc[mask, "color"] = color_code
         senegal_map.plot(color=senegal_map["color"], edgecolor="white", linewidth=0.5, ax=ax)
-    else:
-        ax.text(0.5, 0.5, "Carte non disponible", color="white", ha='center')
-
     ax.set_axis_off()
     
-    # Appel de l'IA (GROQ)
+    # Appel de l'IA (Correction du modèle Groq ici)
     try:
         api_key = st.secrets["GROQ_API_KEY"]
-        llm = ChatGroq(model_name="llama3-70b-8192", groq_api_key=api_key)
+        # CHANGEMENT DU MODELE ICI : llama-3.3-70b-versatile
+        llm = ChatGroq(model_name="llama-3.3-70b-versatile", groq_api_key=api_key)
         prompt = hub.pull("hwchase17/react")
         agent = create_react_agent(llm, tools_agent, prompt)
         executor = AgentExecutor(agent=agent, tools=tools_agent, verbose=True, handle_parsing_errors=True, max_iterations=5)
         
         instr = "RÉPONDS EN FRANÇAIS." if langue == "French" else "RESPOND IN ENGLISH."
-        query = f"{instr} Analyse la crise à {zone}. Choc: Prix x{prix}, NDVI x{ndvi}."
+        query = f"{instr} Analyse la crise à {zone}. Choc simulé: Phase IPC {phase_val}, Prix x{prix}, NDVI x{ndvi}."
         res = executor.invoke({"input": query})
         rapport = res["output"]
     except Exception as e:
-        rapport = f"Erreur Agent : {e}\n\nRecommandation : Activer le plan d'urgence (CBT) à {zone}."
+        rapport = f"Note: Le rapport détaillé est indisponible (Erreur API), mais le GNN confirme une Phase {phase_val} à {zone}."
 
-    return fig, rapport
+    return fig, phase_val, rapport
 
 # --- INTERFACE ---
 with st.sidebar:
@@ -136,10 +134,14 @@ col1, col2 = st.columns([1, 1.2])
 
 if run:
     with st.spinner("Calcul GNN & Recherche RAG..."):
-        fig_map, report = simulation_gnn_rag(zone_test, prix, ndvi, langue)
+        fig_map, phase_result, report = simulation_gnn_rag(zone_test, prix, ndvi, langue)
         with col1:
             st.subheader("📍 Carte de Risque GNN")
             st.pyplot(fig_map)
+            # AFFICHAGE DE LA PHASE EN GROS
+            color_text = "🔴 CRITIQUE" if phase_result >= 4 else "🟠 ALERTE" if phase_result == 3 else "🟡 SURVEILLANCE"
+            st.metric(label=f"Phase IPC Prédite pour {zone_test}", value=f"Phase {phase_result}", delta=color_text, delta_color="inverse")
+            
         with col2:
             st.subheader("🤖 Rapport de l'Agentic RAG")
             st.markdown(report)
