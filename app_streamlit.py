@@ -13,9 +13,9 @@ warnings.filterwarnings('ignore')
 
 # --- 1. CORRECTIF SQLITE3 (STREAMLIT CLOUD) ---
 try:
-    __import__('pysqlite3')
+    import pysqlite3
     import sys
-    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+    sys.modules['sqlite3'] = pysqlite3
 except ImportError:
     pass
 
