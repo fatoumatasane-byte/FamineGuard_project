@@ -61,24 +61,39 @@ def load_resources():
     v_store = None
     embed_model = None
     chroma_path = "mon_index_chroma"
-    if os.path.exists(chroma_path):
+    db_path = os.path.join(chroma_path, "chroma.sqlite3")
+    if os.path.exists(db_path):
         try:
-            import chromadb
+            import sqlite3 as _sqlite3
             from sentence_transformers import SentenceTransformer
-            # Charger la collection SANS embedding_function pour éviter le bug '_type'
-            chroma_client = chromadb.PersistentClient(path=chroma_path)
-            col_list = chroma_client.list_collections()
-            if not col_list:
-                raise ValueError("Aucune collection trouvée")
-            col_name = col_list[0].name if hasattr(col_list[0], 'name') else str(col_list[0])
-            v_store = chroma_client.get_collection(name=col_name)
+            # Lire les documents directement depuis SQLite — sans chromadb
+            conn = _sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT e.id,
+                    MAX(CASE WHEN em.key='chroma:document' THEN em.string_value END) AS doc,
+                    MAX(CASE WHEN em.key='source'          THEN em.string_value END) AS src,
+                    MAX(CASE WHEN em.key='page'            THEN em.int_value    END) AS pg
+                FROM embeddings e
+                JOIN embedding_metadata em ON em.id = e.id
+                GROUP BY e.id
+                HAVING doc IS NOT NULL
+            """)
+            rows = cur.fetchall()
+            conn.close()
+            if not rows:
+                raise ValueError("Aucun document trouvé dans chroma.sqlite3")
+            documents = [r[1] for r in rows]
+            metadatas = [{'source': r[2] or '', 'page': r[3] or 0} for r in rows]
             embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            count = v_store.count()
-            st.sidebar.success(f"✅ RAG : {count} chunks indexés")
+            doc_embeddings = embed_model.encode(
+                documents, batch_size=64,
+                normalize_embeddings=True, show_progress_bar=False
+            )
+            v_store = {'documents': documents, 'metadatas': metadatas, 'embeddings': doc_embeddings}
+            st.sidebar.success(f"✅ RAG : {len(documents)} chunks indexés")
         except Exception as e:
             st.sidebar.warning(f"⚠️ RAG non disponible : {e}")
-            v_store = None
-            embed_model = None
     return gdf, v_store, embed_model
 
 gdf, vectorstore, embed_model = load_resources()
@@ -115,25 +130,20 @@ def get_susceptible_neighbors(gdf, zone_name, target_phase, prix_val, ndvi_val):
     return {k: v for k, v in result.items() if v >= 2}
 
 def tool_search_rag(query):
-    """Recherche dans les archives PDF indexées. Retourne None si indisponible."""
+    """Recherche cosine similarity dans les archives PDF. Retourne None si indisponible."""
     if vectorstore is None or embed_model is None:
         return None
     try:
-        query_emb = embed_model.encode([query], normalize_embeddings=True).tolist()
-        results = vectorstore.query(
-            query_embeddings=query_emb,
-            n_results=3,
-            include=["documents", "metadatas"]
-        )
-        docs  = results["documents"][0]
-        metas = results["metadatas"][0]
-        if not docs:
-            return None
+        q_emb = embed_model.encode([query], normalize_embeddings=True)[0]
+        scores = np.dot(vectorstore['embeddings'], q_emb)
+        top_idx = np.argsort(scores)[::-1][:3]
         parts = []
-        for doc, meta in zip(docs, metas):
-            source = os.path.basename(meta.get('source', 'document')) if meta else 'document'
-            page   = meta.get('page', '?') if meta else '?'
-            parts.append(f"📄 {source}, p.{page}\n{doc}")
+        for idx in top_idx:
+            doc  = vectorstore['documents'][idx]
+            meta = vectorstore['metadatas'][idx]
+            src  = os.path.basename(meta.get('source', 'document'))
+            pg   = meta.get('page', '?')
+            parts.append(f"📄 {src}, p.{pg}\n{doc}")
         return "\n\n---\n\n".join(parts)
     except Exception:
         return None
