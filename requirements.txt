@@ -1,37 +1,21 @@
-# ── Core data & geo ───────────────────────────────────────────────
+streamlit
+torch
 numpy==1.26.4
 pandas
-geopandas
-folium
-streamlit-folium
-scikit-learn
 matplotlib
 networkx
-
-# ── Deep learning ─────────────────────────────────────────────────
-torch
-torch-geometric
-
-# ── LangChain ecosystem ───────────────────────────────────────────
+geopandas
 langchain==0.2.16
-langchain-core==0.2.43
 langchain-community==0.2.16
-langchain-text-splitters
-langchain-huggingface
+langchain-core==0.2.43
 langchain-groq==0.1.9
 langchainhub==0.1.21
-langchain-chroma>=0.1.4
-
-# ── Vector store ──────────────────────────────────────────────────
 chromadb==0.5.3
-pysqlite3-binary
-
-# ── Embeddings & NLP ──────────────────────────────────────────────
-sentence-transformers
 pypdf
-
-# ── LLM API ───────────────────────────────────────────────────────
-openai
-
-# ── Protobuf ──────────────────────────────────────────────────────
+sentence-transformers
+torch-geometric
 protobuf==4.25.3
+langchain-text-splitters
+scikit-learn
+pysqlite3-binary
+openai
