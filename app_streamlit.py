@@ -3,13 +3,16 @@ import warnings
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import folium
+from streamlit_folium import st_folium
 import geopandas as gpd
-import networkx as nx
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
+from openai import OpenAI
 
 warnings.filterwarnings('ignore')
 
-# --- 1. CORRECTIF SQLITE3 POUR STREAMLIT CLOUD ---
+# --- 1. CORRECTIF SQLITE3 POUR LE CLOUD ---
 try:
     __import__('pysqlite3')
     import sys
@@ -18,186 +21,136 @@ except ImportError:
     pass
 
 # --- CONFIGURATION INTERFACE ---
-st.set_page_config(page_title="FamineGuard AI", layout="wide", page_icon="🌾")
+st.set_page_config(page_title="FamineGuard Interactive", layout="wide", page_icon="🌾")
+
+# Custom CSS pour un look "Dark Tech"
 st.markdown("""
     <style>
-    .main { background-color: #0E1117; color: white; }
-    .stMetric { background-color: #161b22; border-radius: 10px; padding: 15px; border: 1px solid #30363d; }
+    .main { background-color: #0E1117; }
+    .stMetric { border: 1px solid #30363d; padding: 10px; border_radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🌾 FamineGuard: Spatiotemporal GNN & Agentic RAG")
-st.markdown("### AIMS Senegal - SDGs Innovation Challenge 2026")
-
-# --- 2. CHARGEMENT DES RESSOURCES ---
+# --- 2. CHARGEMENT DES DONNÉES ---
 @st.cache_resource
-def load_resources():
-    # Données CSV
-    try:
-        df = pd.read_csv('ipc_sen_area_long_latest.csv')
-        df.columns = df.columns.str.strip()
-        for c in ['Area', 'area_name', 'zone', 'title', 'nom_zone']:
-            if c in df.columns:
-                df = df.rename(columns={c: 'zone_display'})
-                break
-    except:
-        df = pd.DataFrame({'zone_display': ["Dakar", "Bakel", "Matam", "Podor", "Saint-Louis", "Tambacounda", "Kaolack", "Ziguinchor"]})
-
+def load_data():
     # Carte GeoJSON
-    s_map = None
-    if os.path.exists('ipc_sen.geojson'):
-        s_map = gpd.read_file('ipc_sen.geojson')
-        # Normalisation des colonnes de nom
-        if 'title' not in s_map.columns:
-            for c in s_map.columns:
-                if c.lower() in ['name', 'reg', 'admin', 'title', 'nom']:
-                    s_map = s_map.rename(columns={c: 'title'})
-                    break
+    gdf = gpd.read_file('ipc_sen.geojson')
+    # On s'assure d'avoir une colonne 'title' propre
+    if 'title' not in gdf.columns:
+        gdf['title'] = gdf['ADM2_FR'] if 'ADM2_FR' in gdf.columns else gdf.index.astype(str)
     
-    # --- CHARGEMENT DU VECTORSTORE RAG ---
+    # RAG - Embeddings
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    
+    # RAG - Vectorstore
     v_store = None
-    chroma_path = "mon_index_chroma"
-    if os.path.exists(chroma_path):
+    if os.path.exists("mon_index_chroma"):
         try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            from langchain_community.vectorstores import Chroma
-            embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-            v_store = Chroma(persist_directory=chroma_path, embedding_function=embeddings)
-        except Exception as e:
+            v_store = Chroma(persist_directory="mon_index_chroma", embedding_function=embeddings)
+        except:
             v_store = None
-    
-    return df, s_map, v_store
+    return gdf, v_store
 
-nodes_df, senegal_map, vectorstore = load_resources()
+gdf, vectorstore = load_data()
 
-# --- 3. CERVEAU AGENTIC (GROQ) ---
-def famine_guard_brain(zone, phase, prix, ndvi, langue):
-    try:
-        from openai import OpenAI
-        # Récupération de la clé API depuis les secrets ou l'environnement
-        api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
-        client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
+# --- 3. SESSION STATE POUR LE CLIC ---
+if 'selected_zone' not in st.session_state:
+    st.session_state.selected_zone = "Dakar"
 
-        # Recherche RAG
-        context_docs = ""
-        if vectorstore:
-            docs = vectorstore.similarity_search(f"food security crisis in {zone} Senegal", k=2)
-            context_docs = "\n\n".join([d.page_content for d in docs])
+# --- 4. LOGIQUE DE CALCUL DU RISQUE (GNN Simulé) ---
+def get_risk_level(prix, ndvi):
+    if prix > 2.8 or ndvi < 0.2: return 4, "🔴 CRITIQUE", "#E74C3C"
+    if prix > 1.9 or ndvi < 0.35: return 3, "🟠 ALERTE", "#E67E22"
+    return 2, "🟢 STABLE", "#2ECC71"
 
-        lang_inst = "RÉPONDS EN FRANÇAIS." if langue == "French" else "RESPOND IN ENGLISH."
-        
-        prompt = f"""
-        {lang_inst}
-        Tu es un expert senior du PAM et de FEWS NET. 
-        ANALYSE GNN : La zone {zone} est en Phase {phase} (Prix x{prix}, NDVI {ndvi}).
-        CONTEXTE ARCHIVES : {context_docs if context_docs else 'Pas d archives spécifiques.'}
-        
-        Produis un rapport structuré :
-        1. Analyse du risque (facteurs prix/climat)
-        2. Recommandations prioritaires pour les ONGs
-        3. Note sur la propagation vers les zones voisines.
-        """
-
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": "Expert en sécurité alimentaire au Sahel."},
-                      {"role": "user", "content": prompt}],
-            temperature=0.2
-        )
-        return completion.choices[0].message.content, "✅ RAG Actif" if context_docs else "⚠️ Mode Base de Connaissances"
-    except Exception as e:
-        return f"Erreur : {e}", "❌ Erreur API"
-
-# --- 4. INTERFACE SIDEBAR ---
+# --- 5. INTERFACE SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Simulation GNN")
-    villes = sorted(nodes_df['zone_display'].unique())
-    zone_choisie = st.selectbox("Cible de l'analyse", villes)
-    langue_choisie = st.radio("Langue", ["French", "English"])
-    st.markdown("---")
-    prix_val = st.slider("Choc Prix (x)", 1.0, 5.0, 1.5)
+    st.title("⚙️ Simulation")
+    st.info(f"📍 Zone sélectionnée : **{st.session_state.selected_zone}**")
+    
+    prix_val = st.slider("Choc Prix (multiplicateur)", 1.0, 5.0, 1.5)
     ndvi_val = st.slider("Indice Végétation (NDVI)", 0.1, 1.0, 0.4)
-    run = st.button("🚀 LANCER L'ANALYSE AGENTIQUE", use_container_width=True)
+    langue = st.radio("Langue", ["Français", "English"])
+    
+    phase, label, color_hex = get_risk_level(prix_val, ndvi_val)
+    
+    st.markdown("---")
+    st.metric("Risque GNN", f"Phase {phase}", delta=label)
 
-# --- 5. LOGIQUE D'AFFICHAGE ---
-col1, col2 = st.columns([1, 1.2])
+# --- 6. CARTE INTERACTIVE (FOLIUM) ---
+col1, col2 = st.columns([1.2, 1])
 
-if run:
-    # Calcul de la Phase (Logique GNN simplifiée)
-    if prix_val > 2.8 or ndvi_val < 0.2: ph = 4
-    elif prix_val > 1.9 or ndvi_val < 0.3: ph = 3
-    else: ph = 2
+with col1:
+    st.subheader("🗺️ Graphe Spatio-Temporel (Cliquez sur une zone)")
+    
+    # Création de la carte
+    m = folium.Map(location=[14.5, -14.5], zoom_start=7, tiles="CartoDB dark_matter")
 
-    with col1:
-        st.subheader("📍 Visualisation du Graphe GNN")
-        
-        # -- DESSIN DE LA CARTE + GRAPHE --
-        fig, ax = plt.subplots(figsize=(10, 8))
-        fig.patch.set_facecolor('#0E1117')
-        ax.set_facecolor('#0E1117')
+    # On ajoute le GeoJSON avec des événements de clic
+    geojson = folium.GeoJson(
+        gdf,
+        style_function=lambda feature: {
+            'fillColor': color_hex if feature['properties']['title'] == st.session_state.selected_zone else '#2c3e50',
+            'color': 'white',
+            'weight': 1,
+            'fillOpacity': 0.7,
+        },
+        tooltip=folium.GeoJsonTooltip(fields=['title'], aliases=['Zone: '])
+    ).add_to(m)
 
-        if senegal_map is not None:
-            # Nettoyage des noms pour le match
-            senegal_map['clean_title'] = senegal_map['title'].str.lower().str.strip()
-            target_clean = zone_choisie.lower().strip()
-            
-            # 1. Dessin des arêtes (Réseau de voisinage)
-            centroids = senegal_map.geometry.centroid
-            for i, row in senegal_map.iterrows():
-                geom = row.geometry
-                p1 = centroids.iloc[i]
-                # On connecte les voisins (ceux qui partagent une bordure)
-                neighbors = senegal_map[senegal_map.geometry.touches(geom)]
-                for j, neighbor in neighbors.iterrows():
-                    p2 = centroids.iloc[j]
-                    ax.plot([p1.x, p2.x], [p1.y, p2.y], color='#4b6584', linestyle='--', linewidth=0.6, alpha=0.4, zorder=1)
+    # Affichage et capture du clic
+    map_output = st_folium(m, width=700, height=500, key="senegal_map")
 
-            # 2. Dessin des zones (Polygones)
-            color_map = []
-            for idx, row in senegal_map.iterrows():
-                if target_clean in row['clean_title']:
-                    color_map.append("#E74C3C" if ph >= 4 else "#E67E22" if ph == 3 else "#F1C40F")
-                else:
-                    color_map.append("#2d3436") # Zones neutres
-            
-            senegal_map.plot(color=color_map, edgecolor="#636e72", linewidth=0.5, ax=ax, alpha=0.7, zorder=2)
+    # Si l'utilisateur clique sur une région, on met à jour la zone sélectionnée
+    if map_output.get("last_active_drawing"):
+        clicked_zone = map_output["last_active_drawing"]["properties"].get("title")
+        if clicked_zone and clicked_zone != st.session_state.selected_zone:
+            st.session_state.selected_zone = clicked_zone
+            st.rerun()
 
-            # 3. Dessin des nœuds (Villes)
-            ax.scatter(centroids.x, centroids.y, color='#00cec9', s=25, edgecolors='white', linewidth=0.5, zorder=3)
-            
-            # Focus sur la zone sélectionnée
-            target_geo = senegal_map[senegal_map['clean_title'].str.contains(target_clean)]
-            if not target_geo.empty:
-                c = target_geo.geometry.centroid.iloc[0]
-                ax.scatter(c.x, c.y, color='white', s=120, marker='*', zorder=4)
+with col2:
+    st.subheader("🤖 Rapport de l'Agent Expert")
+    
+    if st.button("🚀 Générer l'analyse pour " + st.session_state.selected_zone):
+        with st.spinner("L'expert consulte le GNN et les archives..."):
+            try:
+                # 1. Recherche RAG (Correctif du bug 'int')
+                context = "Aucune archive trouvée."
+                if vectorstore is not None:
+                    # On force le type string pour la recherche
+                    query_text = str(f"food security crisis {st.session_state.selected_zone} Senegal recommendations")
+                    docs = vectorstore.similarity_search(query_text, k=2)
+                    if docs:
+                        context = "\n\n".join([doc.page_content for doc in docs])
 
-        ax.set_axis_off()
-        st.pyplot(fig)
-        
-        # Métriques
-        st.metric("Niveau de Risque Prédit", f"Phase IPC {ph}", delta="ALERTE" if ph >= 3 else "STABLE")
+                # 2. Appel Groq
+                client = OpenAI(
+                    base_url="https://api.groq.com/openai/v1",
+                    api_key=st.secrets["GROQ_API_KEY"]
+                )
+                
+                prompt = f"""
+                Réponds en {langue}. 
+                Tu es un expert FEWS NET. 
+                ZONE : {st.session_state.selected_zone}
+                RISQUE GNN : Phase {phase} (Prix x{prix_val}, NDVI {ndvi_val})
+                ARCHIVES : {context}
+                
+                Rédige un rapport bref : Analyse du choc et 3 recommandations prioritaires.
+                """
+                
+                chat_completion = client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model="llama-3.3-70b-versatile",
+                )
+                
+                st.markdown(f"### 📋 Rapport : {st.session_state.selected_zone}")
+                st.write(chat_completion.choices[0].message.content)
+                
+            except Exception as e:
+                st.error(f"Erreur API : {str(e)}")
 
-    with col2:
-        st.subheader("🤖 Rapport de l'Agent Expert")
-        rapport, badge = famine_guard_brain(zone_choisie, ph, prix_val, ndvi_val, langue_choisie)
-        st.caption(badge)
-        st.markdown(rapport)
-
-else:
-    with col1:
-        st.info("👈 Sélectionnez une zone et configurez les paramètres dans la barre latérale.")
-        # Affichage d'une carte vide par défaut
-        if senegal_map is not None:
-            fig, ax = plt.subplots()
-            fig.patch.set_facecolor('#0E1117')
-            senegal_map.plot(color="#2d3436", edgecolor="#636e72", ax=ax)
-            ax.set_axis_off()
-            st.pyplot(fig)
-    with col2:
-        st.markdown("""
-        ### Bienvenue sur FamineGuard
-        Cette interface simule l'interaction entre notre modèle **GNN Spatiotemporel** et notre **Agent RAG**.
-        
-        - **À gauche** : Visualisation du graphe de propagation (les lignes représentent les dépendances spatiales entre régions).
-        - **À droite** : Rapport généré par l'IA fusionnant les données de simulation et les archives humanitaires.
-        """)
+# --- BAS DE PAGE ---
+st.markdown("---")
+st.caption("FamineGuard Project | AIMS Senegal | SDGs Challenge 2026")
