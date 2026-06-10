@@ -62,14 +62,20 @@ def load_resources():
     chroma_path = "mon_index_chroma"
     if os.path.exists(chroma_path):
         try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            from langchain_chroma import Chroma
-            embeddings = HuggingFaceEmbeddings(
+            import chromadb
+            from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+            ef = SentenceTransformerEmbeddingFunction(
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
-                encode_kwargs={"normalize_embeddings": True}
+                device="cpu",
+                normalize_embeddings=True
             )
-            v_store = Chroma(persist_directory=chroma_path, embedding_function=embeddings)
-            count = v_store._collection.count()
+            chroma_client = chromadb.PersistentClient(path=chroma_path)
+            col_list = chroma_client.list_collections()
+            if not col_list:
+                raise ValueError("Aucune collection trouvée dans l'index Chroma")
+            col_name = col_list[0].name if hasattr(col_list[0], 'name') else str(col_list[0])
+            v_store = chroma_client.get_collection(name=col_name, embedding_function=ef)
+            count = v_store.count()
             st.sidebar.success(f"✅ RAG : {count} chunks indexés")
         except Exception as e:
             st.sidebar.warning(f"⚠️ RAG non disponible : {e}")
@@ -114,14 +120,21 @@ def tool_search_rag(query):
     if vectorstore is None:
         return None
     try:
-        docs = vectorstore.similarity_search(query, k=3)
+        results = vectorstore.query(
+            query_texts=[query],
+            n_results=3,
+            include=["documents", "metadatas"]
+        )
+        docs  = results["documents"][0]
+        metas = results["metadatas"][0]
         if not docs:
             return None
-        return "\n\n---\n\n".join([
-            f"📄 {os.path.basename(d.metadata.get('source', 'document'))}"
-            f", p.{d.metadata.get('page', '?')}\n{d.page_content}"
-            for d in docs
-        ])
+        parts = []
+        for doc, meta in zip(docs, metas):
+            source = os.path.basename(meta.get('source', 'document')) if meta else 'document'
+            page   = meta.get('page', '?') if meta else '?'
+            parts.append(f"📄 {source}, p.{page}\n{doc}")
+        return "\n\n---\n\n".join(parts)
     except Exception:
         return None
 
