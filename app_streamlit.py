@@ -57,7 +57,6 @@ class FamineSTGNN(nn.Module):
 # --- LOADING PIPELINE WITH AUTO-DETECTION ---
 @st.cache_resource
 def load_all_resources():
-    # Chargement de votre vrai CSV de données (44 zones)
     try: 
         df = pd.read_csv('ipc_sen_area_long_latest.csv')
         possible_columns = ['zone', 'Zone', 'region', 'Region', 'department', 'departement', 'adm2_name', 'adm1_name']
@@ -78,23 +77,19 @@ def load_all_resources():
     X_raw = df[features_list].values.astype(np.float32)
     scaler_obj = StandardScaler().fit(X_raw)
 
-    # Chargement de votre vrai modèle GNN entraîné
     gnn_model = FamineSTGNN(in_features=len(features_list))
     if os.path.exists('model_weights.pth'):
         gnn_model.load_state_dict(torch.load('model_weights.pth', map_location=torch.device('cpu')))
     gnn_model.eval()
 
-    # Chargement de votre carte géographique GeoJSON
     s_map = None
     if os.path.exists('ipc_sen.geojson'):
         s_map = gpd.read_file('ipc_sen.geojson')
-        # Standardisation de la colonne de nom de région pour la jointure graphique
         for c in s_map.columns:
             if c.lower() in ['reg', 'region', 'name_1', 'name_2', 'departement', 'dept']:
                 s_map = s_map.rename(columns={c: 'map_zone_name'})
                 break
 
-    # Chargement de votre vraie base de connaissances RAG Chroma
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     v_store = Chroma(persist_directory="mon_index_chroma", embedding_function=embeddings) if os.path.exists('mon_index_chroma') else None
     
@@ -126,12 +121,11 @@ def search_humanitarian_reports(query: str):
 
 tools = [get_gnn_stats, search_humanitarian_reports]
 
-# --- PIPELINE ENGINE (VRAI CALCUL GNN MATHÉMATIQUE) ---
+# --- PIPELINE ENGINE ---
 def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
     df_simule = nodes_df.copy()
     idx = df_simule[df_simule['zone'].str.lower() == zone.lower()].index
     
-    # Application locale du choc anthropique sur le nœud cible du graphe
     if not idx.empty:
         df_simule.loc[idx, 'ndvi_mean'] *= b_ndvi
         df_simule.loc[idx, 'ndvi_anomaly'] = -3.5
@@ -145,14 +139,12 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
     X_scaled = scaler.transform(df_simule[features].values.astype(np.float32))
     num_nodes = len(df_simule)
     
-    # Reconstruction de la matrice d'adjacence globale (Graphe complet interconnecté)
     edges_src = list(range(num_nodes - 1)) + list(range(1, num_nodes))
     edges_dst = list(range(1, num_nodes)) + list(range(num_nodes - 1))
     graph_data = Data(x=torch.tensor(X_scaled, dtype=torch.float), 
                       edge_index=torch.tensor([edges_src, edges_dst], dtype=torch.long), 
                       edge_attr=torch.ones((len(edges_src), 1)))
     
-    # VRAIE PRÉDICTION SANS CONDITION FORCÉE
     with torch.no_grad():
         try: 
             out = model(graph_data)
@@ -166,7 +158,6 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
         current_zone = row['zone']
         phase = int(preds[i % len(preds)])
         
-        # Capture de la phase calculée pour la zone étudiée
         if current_zone.lower() == zone.lower():
             target_zone_phase = phase
             
@@ -180,12 +171,10 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
         })
     pd.DataFrame(alert_records).to_csv('famineguard_alert_report.csv', index=False)
     
-    # Génération du graphique cartographique réel
     fig, ax = plt.subplots(figsize=(5, 4), facecolor='#111111')
     ax.set_facecolor('#111111')
     if senegal_map is not None:
         try:
-            # Coloration dynamique du département ciblé en rouge
             senegal_map["color_status"] = '#2ECC71'
             if 'map_zone_name' in senegal_map.columns:
                 idx_map = senegal_map[senegal_map['map_zone_name'].astype(str).str.lower().str.contains(zone.lower())].index
@@ -195,7 +184,6 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
         except:
             ax.scatter(0.5, 0.5, c='#E74C3C', s=200)
     else:
-        # Dessin schématique de la topologie du réseau de neurones si échec SIG
         for i in range(num_nodes):
             c_node = '#E74C3C' if df_simule.iloc[i]['zone'].lower() == zone.lower() else '#2ECC71'
             ax.scatter(np.random.rand(), np.random.rand(), c=c_node, s=150 if c_node=='#E74C3C' else 40, edgecolors='white')
@@ -211,3 +199,16 @@ def executer_simulation_globale(zone, h_prix, b_ndvi, langue):
         llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0.2, groq_api_key=groq_api_key)
         prompt = hub.pull("hwchase17/react")
         agent = create_react_agent(llm, tools, prompt)
+        executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=6)
+        
+        lang_instr = "IMPORTANT: You MUST write your final response in FRENCH." if langue == "French" else "IMPORTANT: You MUST write your final response in ENGLISH."
+        query = f"""{lang_instr}
+        Provide an operational support report for the zone: {zone}.
+        Instructions:
+        1. Use 'get_gnn_stats' to verify current phase and multivariate metrics.
+        2. Query 'search_humanitarian_reports' with focus on 2012 analogies to extract textual context.
+        3. You MUST cite the source file names or metadata matching your retrieval findings.
+        4. Synthesize into 3 actionable steps."""
+        
+        res = executor.invoke({"input": query})
+        report_out = res["output"]
