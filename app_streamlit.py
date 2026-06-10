@@ -74,7 +74,8 @@ def load_resources():
                 encode_kwargs={"normalize_embeddings": True}
             )
             v_store = Chroma(persist_directory=chroma_path, embedding_function=embeddings)
-            v_store.get()
+            count = v_store._collection.count()
+            st.sidebar.success(f"✅ RAG chargé : {count} chunks indexés")
         except Exception as e:
             st.sidebar.warning(f"⚠️ RAG non disponible : {e}")
             v_store = None
