@@ -19,3 +19,7 @@ langchain-text-splitters
 scikit-learn
 pysqlite3-binary
 openai
+langchain-huggingface
+langchain-chroma
+folium
+streamlit-folium
