@@ -110,15 +110,20 @@ def get_susceptible_neighbors(gdf, zone_name, target_phase, prix_val, ndvi_val):
     return {k: v for k, v in result.items() if v >= 2}
 
 def tool_search_rag(query):
+    """Recherche dans les archives PDF indexées. Retourne None si indisponible."""
     if vectorstore is None:
-        return "Archives non disponibles."
+        return None
     try:
         docs = vectorstore.similarity_search(query, k=3)
-        return "\n\n".join(
-            [f"[SOURCE: {d.metadata.get('source', 'PDF')}]\n{d.page_content}" for d in docs]
-        )
-    except Exception as e:
-        return f"Erreur RAG: {e}"
+        if not docs:
+            return None
+        return "\n\n---\n\n".join([
+            f"📄 {os.path.basename(d.metadata.get('source', 'document'))}"
+            f", p.{d.metadata.get('page', '?')}\n{d.page_content}"
+            for d in docs
+        ])
+    except Exception:
+        return None
 
 def famine_guard_agent(zone, phase, prix, ndvi, susceptible, langue):
     try:
@@ -126,51 +131,127 @@ def famine_guard_agent(zone, phase, prix, ndvi, susceptible, langue):
             base_url="https://api.groq.com/openai/v1",
             api_key=st.secrets["GROQ_API_KEY"]
         )
-        rag = tool_search_rag(f"food security crisis {zone} Senegal interventions recommendations")
-        lang = "RÉPONDS ENTIÈREMENT EN FRANÇAIS." if langue == "Français" else "RESPOND ENTIRELY IN ENGLISH."
-        neighbors_str = ", ".join(
-            [f"{z} ({PHASE_LABELS[p]})" for z, p in susceptible.items()]
-        ) or "Aucune"
 
-        prompt = f"""
+        # ── Interprétation des indicateurs ───────────────────────────────────
+        ndvi_interp = (
+            "critique (< 0.2) — désastre végétatif, récoltes quasi nulles" if ndvi < 0.2
+            else "très faible (0.2–0.35) — stress sévère, rendements fortement réduits" if ndvi < 0.35
+            else "faible (0.35–0.5) — végétation sous la normale, soudure difficile" if ndvi < 0.5
+            else "normal (> 0.5) — couverture végétale satisfaisante"
+        )
+        prix_interp = (
+            f"×{prix:.1f} — urgence : accès alimentaire hors de portée pour les ménages vulnérables" if prix > 2.5
+            else f"×{prix:.1f} — très élevés : les ménages pauvres consacrent >70% du revenu à l'alimentation" if prix > 1.8
+            else f"×{prix:.1f} — en hausse : stress sur le pouvoir d'achat alimentaire" if prix > 1.3
+            else f"×{prix:.1f} — quasi normaux"
+        )
+        neighbors_str = (
+            ", ".join([f"{z} ({PHASE_LABELS[p]})" for z, p in susceptible.items()])
+            if susceptible else "Aucune zone voisine à risque élevé détectée"
+        )
+
+        # ── 3 requêtes RAG ciblées ────────────────────────────────────────────
+        rag1 = tool_search_rag(f"{zone} Senegal food insecurity IPC phase {phase} crisis history")
+        rag2 = tool_search_rag(f"IPC phase {phase} emergency response interventions Sahel Senegal recommendations")
+        rag3 = tool_search_rag(f"food price shock NDVI vegetation deficit Senegal cereal market crisis")
+
+        has_rag = any(r is not None for r in [rag1, rag2, rag3])
+        rag_section = ""
+        if rag1: rag_section += f"\n\n🔍 Historique de la zone :\n{rag1}"
+        if rag2: rag_section += f"\n\n🔍 Réponses documentées pour Phase {phase} :\n{rag2}"
+        if rag3: rag_section += f"\n\n🔍 Contexte prix/NDVI au Sénégal :\n{rag3}"
+        if not has_rag:
+            rag_section = "Archives PDF non indexées sur ce déploiement. Utiliser les connaissances générales FEWS NET/WFP/FAO."
+
+        # ── Prompt ───────────────────────────────────────────────────────────
+        lang = "RÉPONDS ENTIÈREMENT EN FRANÇAIS." if langue == "Français" else "RESPOND ENTIRELY IN ENGLISH."
+
+        system_prompt = (
+            "Tu es un expert senior en sécurité alimentaire pour FEWS NET et le PAM. "
+            "Tu analyses les prédictions d'un modèle GNN (Graph Neural Network) spatiotemporel "
+            "qui prédit les phases IPC pour les zones du Sénégal à partir de données NDVI, "
+            "prix des céréales et connectivité routière. "
+            "Ton rôle : expliquer les prédictions, les contextualiser avec les archives humanitaires, "
+            "et formuler des recommandations opérationnelles concrètes."
+        )
+
+        user_prompt = f"""
 {lang}
 
-ZONE CIBLE : {zone}
-PRÉDICTION GNN : {PHASE_LABELS[phase]} (Choc prix ×{prix:.1f}, NDVI {ndvi:.2f})
-ZONES VOISINES SUSCEPTIBLES : {neighbors_str}
-ARCHIVES HUMANITAIRES : {rag}
+═══════════════════════════════════════════
+  RÉSULTATS DU MODÈLE GNN — FAMINEGUARD
+═══════════════════════════════════════════
+Zone analysée            : {zone}
+Phase IPC prédite        : {PHASE_LABELS[phase]}
+Indice NDVI              : {ndvi:.2f}  → {ndvi_interp}
+Choc prix céréales       : {prix_interp}
+Zones voisines à risque  : {neighbors_str}
 
-Génère un rapport structuré :
+═══════════════════════════════════════════
+  ARCHIVES HUMANITAIRES (FEWS NET / WFP / FAO)
+═══════════════════════════════════════════
+{rag_section}
 
-**1. 📊 Analyse du Choc**
-Explique les facteurs déclencheurs dans {zone} et le risque de propagation vers les zones voisines.
+═══════════════════════════════════════════
+  RAPPORT À PRODUIRE
+═══════════════════════════════════════════
 
-**2. 📚 Analogies Historiques**
-Cite des situations similaires dans les archives [SOURCE: ...].
+**1. 🔍 Explication de la Prédiction du GNN**
+Explique POURQUOI le modèle a classé {zone} en {PHASE_LABELS[phase]} :
+- Ce que signifie concrètement un NDVI de {ndvi:.2f} pour les cultures et l'élevage de cette zone
+- L'impact réel d'un choc prix à ×{prix:.1f} sur les ménages vulnérables
+- Comment ces deux facteurs combinés déclenchent la Phase {phase} selon les critères IPC
+- Pourquoi le risque se propage vers les zones voisines identifiées
 
-**3. 🎯 3 Actions Recommandées**
-Interventions prioritaires concrètes, avec focus sur les zones voisines susceptibles.
+**2. 📚 Contexte Historique et Analogies**
+En t'appuyant sur les archives disponibles :
+- Cite des épisodes similaires dans cette région [SOURCE: fichier.pdf, p.X]
+- Identifie les patterns saisonniers ou structurels de vulnérabilité
+- Mentionne les facteurs aggravants typiques (soudure, transhumance, conflits)
+
+**3. 🎯 Recommandations Opérationnelles**
+3 actions prioritaires adaptées à la {PHASE_LABELS[phase]}, chacune avec :
+→ L'action concrète
+→ La population cible
+→ Le délai d'intervention recommandé
+→ Une référence documentaire si disponible [SOURCE: ...]
 
 **4. 📋 Sources utilisées**
 """
+
         resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "Expert senior PAM/FEWS NET Sénégal. Rapports précis et sourcés."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt}
             ],
-            temperature=0.2,
-            max_tokens=1200
+            temperature=0.15,
+            max_tokens=1500
         )
-        return resp.choices[0].message.content
+
+        rag_badge = (
+            "✅ **RAG actif** — Rapport basé sur les archives FEWS NET / WFP / FAO indexées"
+            if has_rag else
+            "⚠️ **Mode dégradé** — Archives non disponibles, basé sur connaissances générales"
+        )
+        return resp.choices[0].message.content, rag_badge
+
     except Exception as e:
-        return f"❌ Erreur agent : {e}"
+        fallback = (
+            f"**❌ Erreur technique :** `{e}`\n\n"
+            f"**Zone {zone} — {PHASE_LABELS[phase]}**\n\n"
+            f"Actions d'urgence recommandées :\n"
+            f"1. Évaluation terrain immédiate\n"
+            f"2. Activation mécanismes de réponse rapide WFP\n"
+            f"3. Coordination autorités locales"
+        )
+        return fallback, "❌ Erreur LLM"
 
 # ─── SESSION STATE ────────────────────────────────────────────────────────────
 for key, val in [
     ('selected_zone', None), ('analysis_run', False),
     ('prix_val', 1.8), ('ndvi_val', 0.35),
-    ('langue', 'Français'), ('rapport', None)
+    ('langue', 'Français'), ('rapport', None), ('rag_badge', None)
 ]:
     if key not in st.session_state:
         st.session_state[key] = val
@@ -460,7 +541,7 @@ with col2:
 
         if st.button("🤖 Générer le rapport IA", use_container_width=True):
             with st.spinner("Agent IA : GNN → RAG → Synthèse..."):
-                st.session_state.rapport = famine_guard_agent(
+                rapport, badge = famine_guard_agent(
                     st.session_state.selected_zone,
                     target_phase,
                     st.session_state.prix_val,
@@ -468,8 +549,11 @@ with col2:
                     susceptible,
                     st.session_state.langue
                 )
+                st.session_state.rapport   = rapport
+                st.session_state.rag_badge = badge
 
         if st.session_state.rapport:
+            st.caption(st.session_state.rag_badge)
             st.markdown(st.session_state.rapport)
 
 st.caption("FamineGuard v3.0 | AIMS Senegal 2026 | Decision Support System")
